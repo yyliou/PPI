@@ -13,22 +13,24 @@ library("tidyverse")
 library("spatialreg")
 library("rgdal")
 library("rgeos")
+library("fastDummies")
 
 #install.packages('spDataLarge',
 #                 repos='https://nowosad.github.io/drat/',
 #                 type='source')
 
 library("spDataLarge")
-
+data <- ex_sales
 # function begin
-ppi <- function(price,date,areas,object,
-                invar = NULL,
+ppi <- function(price,date,areas,object,invar,catvar,
                 neighbor = 3,
                 spvar = c('longitude','latitude'),
                 method = "ols",
                 mavar = NULL,
                 ci = .9,
+                train = .9,
                 family = "binomial"){
+  # basic
   result <- list()
   data <- object
   names(data)[names(data) == price] <- "p"
@@ -41,22 +43,69 @@ ppi <- function(price,date,areas,object,
   data$lnap <- log(data$p/data$a)
   data$actual <- data$lnap
   data <- data[order(data$N),]
-  # modifiy data
+  # category var
+  cat <- data[, catvar]
+  data <- data[,!(names(data) %in% catvar)]
+  cat <- dummy_cols(cat, select_columns = catvar)
+  cat <- cat[,!(names(cat) %in% catvar)]
+  catname <- names(cat)
+  data <- cbind(data,cat)
+  # modify data
   data <- data[complete.cases(data$date),]
   data <- data[complete.cases(data[,spvar]),]
   data <- data[complete.cases(data$N),]
   data <- data[!duplicated(data[,spvar]),] # do not allow duplicated data
-  x <- data.matrix(data[, invar])
- 
-  #lasso deduction
-  y <- data$lnap
-  cv_model <- cv.glmnet(x, y, alpha = 1)
+  x <- data
+  y <- data[,c("lnap","N")]
+  tind <- round(max(x$N)*train)
+  x_train   <- x[x$N <  tind,]
+  x_test    <- x[x$N >= tind,]
+  y_train   <- y[y$N <  tind,]
+  y_test    <- y[y$N >= tind,]
+  x_train   <- data.matrix(x_train[, c(invar,catname)])
+  x_test    <- data.matrix(x_test[, c(invar,catname)])
+  y_train$N <- NULL
+  y_test$N  <- NULL
+  y_train   <- as.matrix(y_train)
+  y_test    <- as.matrix(y_test)
+  #lasso
+  cv_model <- cv.glmnet(x_train, y_train, alpha = 1)
   best_lambda <- cv_model$lambda.min
-  best_model <- glmnet(x, y, alpha = 1, lambda = best_lambda)
-  result[[2]] <- coef(best_model)
+  best_model <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda)
+  ridge <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda)
+  linear_use <- as.data.frame(cbind(y_train,x_train))
+  linear <- lm(lnap ~ .,data = linear_use)
+  result[[2]] <- data.frame(
+    Linear  = linear$coefficients,
+    Lasso   = as.vector(coef(best_model)),
+    Ridge   = as.vector(coef(ridge))
+  )
+  # Compute R^2 from true and predicted values
+  eval_results <- function(true, predicted, df) {
+    SSE <- sum((predicted - true)^2)
+    SST <- sum((true - mean(true))^2)
+    R_square <- 1 - SSE / SST
+    RMSE = sqrt(SSE/nrow(df))
+    # Model performance metrics
+    data.frame(
+      RMSE = RMSE,
+      Rsquare = R_square
+    )
+  }
+  pred_lasso <- predict(best_model, s = best_lambda, newx = x_test)
+  pred_ridge <- predict(ridge, s = best_lambda, newx = x_test)
+  pred_linear <- predict(linear, newdata = as.data.frame(x_test))
+  lasso <- eval_results(y_test, pred_lasso, x_test)
+  ridge <- eval_results(y_test, pred_ridge, x_test)
+  linear <- eval_results(y_test, pred_linear, x_test)
+  per <- rbind(lasso,ridge)
+  per <- rbind(per,linear)
+  rownames(per) <- c("lasso","ridge","linear")
+  result[[3]] <- per
+  x <- rbind(x_train,x_test)
   data$lasso_pred <- predict(best_model, s = best_lambda, newx = x)
   data$lnap <- data$lnap - data$lasso_pred
-  # h-correction & ipw
+  # heckman & ipw
   if(method == "heck"|method == "ipw"){
     fm <- as.formula(paste0("binary ~", mavar))
     mill <- list()
@@ -85,7 +134,7 @@ ppi <- function(price,date,areas,object,
       m <- lm(lnap ~ ym,data = data, weight = weight)
     }
   }
-  # without solving endogenity
+  # ols
   if(method == "ols"){
     m <- lm(lnap ~ ym,data = data)
   }
@@ -126,7 +175,7 @@ ppi <- function(price,date,areas,object,
   out$index <- (exp(out$coef))*100
   out$lb <- (exp(out$coef - out$se*qnorm(1-(1-ci)/2)))*100
   out$ub <- (exp(out$coef + out$se*qnorm(1-(1-ci)/2)))*100
-  result[[3]] <- out
+  result[[4]] <- out
   data$lasso_r <- (data$actual-data$lasso_pred)^2
   data$index_r <- (data$actual-data$lasso_pred-data$pred)^2
   data$sp_r <- (data$actual-data$lasso_pred-data$pred-data$fit)^2
@@ -142,22 +191,25 @@ ppi <- function(price,date,areas,object,
   r2 <- rbind(r2,spatial.r2)
   r2 <- rbind(r2,resid.r2)
   rmse <- rmse(data$actual, data$final_pred)
-  result[[4]] <- rbind(r2,rmse)
+  result[[5]] <- rbind(r2,rmse)
   result
 }
+
 # example
 # data(seattle_sales)
 # seattle_sales
 # data(ex_sales)
 # ex_sales
+# ls(ex_sales)
 
 res <- ppi(price  = "sale_price",
            date   = "sale_date",
            areas  = "lot_sf",
            object = ex_sales,
            method = "ipw",
-           invar  = c('age','area','baths','beds','bldg_grade','eff_age',
-                      'latitude','longitude','use_type','wfnt'),
+           invar  = c('age','baths','beds','bldg_grade',
+                      'eff_age','tot_sf','wfnt'),
+           catvar = c('area','use_type'),
            neighbor = 3,
            spvar = c('longitude','latitude'),
            mavar  = "age + baths + beds")
@@ -168,8 +220,11 @@ res[[1]]
 # coef
 res[[2]]
 
-# index
+# performance
 res[[3]]
 
-# variation
+# index
 res[[4]]
+
+# variation
+res[[5]]
