@@ -51,7 +51,7 @@ ppi <- function(price,date,areas,object,invar,catvar,
   catname <- names(cat)
   data <- cbind(data,cat)
   # modify data
-  data <- data[complete.cases(data$date),]
+  data <- data[,]
   data <- data[complete.cases(data[,spvar]),]
   data <- data[complete.cases(data$N),]
   data <- data[!duplicated(data[,spvar]),] # do not allow duplicated data
@@ -139,17 +139,20 @@ ppi <- function(price,date,areas,object,invar,catvar,
     m <- lm(lnap ~ ym,data = data)
   }
   data$pred <- predict(m, newdata = data, type = "response")
-  # spatial deduction
+  # spatial
   sp_list <- list()
   rho_file <- data[!duplicated(data$ym), ]
   rho_file <- as.data.frame(rho_file[,'ym'])
   rho_file$rho <- NA
   names(rho_file)[1] <- "ym"
+  geo <- list()
   for( i in min(data$N):max(data$N)){
     sp <- data[data$N == i,]
-    nc <- data.matrix(sp[, spvar])
-    nc <- knearneigh(nc, k=neighbor, longlat = T)
+    nc.cord <- data.matrix(sp[, spvar])
+    nc <- knearneigh(nc.cord, k=neighbor, longlat = T)
     nb <- knn2nb(nc)
+    plot(nb,nc.cord)
+    geo[[i]] <- recordPlot()
     listw <- nb2listw(nb) 
     reg <- lagsarlm(lnap ~ 1, data = sp, listw)
     rho_file[i,2] <- summary(reg)$rho
@@ -161,6 +164,7 @@ ppi <- function(price,date,areas,object,invar,catvar,
     sp$signal <- NULL
     sp_list[[i]] <- sp
   }
+  result[[8]] <- geo
   rho_file$lb <- rho_file$rho - rho_file$V3*qnorm(1-(1-ci)/2)
   rho_file$ub <- rho_file$rho + rho_file$V3*qnorm(1-(1-ci)/2)
   result[[1]] <- rho_file
@@ -192,6 +196,35 @@ ppi <- function(price,date,areas,object,invar,catvar,
   r2 <- rbind(r2,resid.r2)
   rmse <- rmse(data$actual, data$final_pred)
   result[[5]] <- rbind(r2,rmse)
+  # Index Plotting
+  col <- data.frame(as.yearmon(gsub("ym","",rownames(result[[4]]))))
+  rownames(result[[4]]) <- NULL
+  result[[4]] <- cbind(col,result[[4]])
+  names(result[[4]])[1] <- "ym"
+  a1 <- data.frame(ym = min(as.yearmon(data$ym)),
+                   coef = 0,se = 0,index = 100,lb = 100,ub = 100)
+  result[[4]] <- rbind(a1,result[[4]])
+  dfplot <- result[[4]]
+  dfplot$se <- NULL
+  dfplot$coef <- NULL
+  names(dfplot) <- c("ym","Index","Lower Bond","Upper Bond")
+  dfplot <- dfplot %>% gather(key, value, -ym)
+  result[[6]] <- ggplot(dfplot, mapping = aes(x = ym, y = value, color = key)) + 
+    geom_line() + scale_color_manual(values=c("darkred", "gray","gray")) +
+    labs(x = 'Month',y = 'Index',colour="Legend",
+         title = 'Monthly Property Price Index (PPI)') +
+    geom_hline(yintercept=100, linetype="dashed", color = "red")
+  # Spatial Plotting
+  dfplot <- result[[1]]
+  dfplot$ym <- as.yearmon(dfplot$ym)
+  dfplot$V3 <- NULL
+  names(dfplot) <- c("ym","Rho","Lower Bond","Upper Bond")
+  dfplot <- dfplot %>% gather(key, value, -ym)
+  result[[7]] <- ggplot(dfplot, mapping = aes(x = ym, y = value, color = key)) + 
+    geom_line() + scale_color_manual(values=c("gray", "darkred","gray")) +
+    labs(x = 'Month',y = 'Index',colour="Legend",
+         title = 'Spatial Correlation Index') +
+    geom_hline(yintercept=0, linetype="dashed", color = "red")
   result
 }
 
@@ -228,3 +261,12 @@ res[[4]]
 
 # variation
 res[[5]]
+
+# index plot
+res[[6]]
+
+# spatial corr plot
+res[[7]]
+
+# map
+res[[8]][[5]]
