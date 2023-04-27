@@ -6,6 +6,19 @@ library("hpiR")
 library("Metrics")
 library("glmnet")
 library("sp")
+library("data.table")
+library("spdep")
+library("spData")
+library("tidyverse")  
+library("spatialreg")
+library("rgdal")
+library("rgeos")
+
+#install.packages('spDataLarge',
+#                 repos='https://nowosad.github.io/drat/',
+#                 type='source')
+
+library("spDataLarge")
 
 # function begin
 ppi <- function(price,date,areas,object,
@@ -28,6 +41,11 @@ ppi <- function(price,date,areas,object,
   data$lnap <- log(data$p/data$a)
   data$actual <- data$lnap
   data <- data[order(data$N),]
+  # modifiy data
+  data <- data[complete.cases(data$date),]
+  data <- data[complete.cases(data[,spvar]),]
+  data <- data[complete.cases(data$N),]
+  data <- data[!duplicated(data[,spvar]),] # do not allow duplicated data
   x <- data.matrix(data[, invar])
   # spatial deduction
   sp_list <- list()
@@ -37,11 +55,11 @@ ppi <- function(price,date,areas,object,
   names(rho_file)[1] <- "ym"
   for( i in min(data$N):max(data$N)){
     sp <- data[data$N == i,]
-    nc.coords <- data.matrix(sp[, spvar])
-    nc.5nn <- knearneigh(nc.coords, k=neighbor, longlat = T)
-    nc.5nn.nb <- knn2nb(nc.5nn)
-    queen.listw <- nb2listw(nc.5nn.nb) 
-    reg <- lagsarlm(lnap ~ 1, data = sp, queen.listw)
+    nc <- data.matrix(sp[, spvar])
+    nc <- knearneigh(nc, k=neighbor, longlat = T)
+    nb <- knn2nb(nc)
+    listw <- nb2listw(nb) 
+    reg <- lagsarlm(lnap ~ 1, data = sp, listw)
     rho_file[i,2] <- summary(reg)$rho
     rho_file[i,3] <- summary(reg)$rho.se
     sp_pred <- as.data.frame(predict(reg))
@@ -54,7 +72,7 @@ ppi <- function(price,date,areas,object,
   rho_file$lb <- rho_file$rho - rho_file$V3*qnorm(1-(1-ci)/2)
   rho_file$ub <- rho_file$rho + rho_file$V3*qnorm(1-(1-ci)/2)
   result[[1]] <- rho_file
-  data <- data.table::rbindlist(sp_list,idcol=T)
+  data <- rbindlist(sp_list,idcol=T)
   #lasso deduction
   y <- data$lnap
   cv_model <- cv.glmnet(x, y, alpha = 1)
@@ -72,10 +90,9 @@ ppi <- function(price,date,areas,object,
       hco$binary <- ifelse(hco$N > min(hco$N),1,0)
       hco_model <- glm(fm,data = hco,family = "binomial")
       hco$mill <- predict(hco_model, newdata = hco, type = "response")
-      mill[[i]] <- hco
+      mill[[i-1]] <- hco
     }
-    mill <- data.table::rbindlist(mill,idcol=T)
-    mill <- as.data.frame(mill)
+    mill <- as.data.frame(rbindlist(mill,idcol=T))
     mill$.id <- NULL
     first <- mill[mill$N == min(mill$N),]
     a <- first %>%
@@ -98,6 +115,7 @@ ppi <- function(price,date,areas,object,
     m <- lm(lnap ~ ym,data = data)
   }
   data$pred <- predict(m, newdata = data, type = "response")
+  # variation
   data$final_pred <- data$pred + data$lasso_pred + data$fit
   out <- data.frame(
     coef = summary(m)$coefficients[
@@ -124,18 +142,18 @@ ppi <- function(price,date,areas,object,
   result[[4]] <- rbind(r2,rmse)
   result
 }
-
 # example
 # data(seattle_sales)
 # seattle_sales
-# ls(seattle_sales)
+# data(ex_sales)
+# ex_sales
 
 res <- ppi(price  = "sale_price",
            date   = "sale_date",
            areas  = "lot_sf",
-           object = seattle_sales,
+           object = ex_sales,
            method = "ipw",
-           invar  = c('age','area','baths', 'beds', 'bldg_grade', 'eff_age',
+           invar  = c('age','area','baths','beds','bldg_grade','eff_age',
                       'latitude','longitude','use_type','wfnt'),
            neighbor = 3,
            spvar = c('longitude','latitude'),
