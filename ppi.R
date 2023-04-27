@@ -27,7 +27,7 @@ ppi <- function(price,date,areas,object,
                 spvar = c('longitude','latitude'),
                 method = "ols",
                 mavar = NULL,
-                ci = .95,
+                ci = .9,
                 family = "binomial"){
   result <- list()
   data <- object
@@ -47,32 +47,7 @@ ppi <- function(price,date,areas,object,
   data <- data[complete.cases(data$N),]
   data <- data[!duplicated(data[,spvar]),] # do not allow duplicated data
   x <- data.matrix(data[, invar])
-  # spatial deduction
-  sp_list <- list()
-  rho_file <- data[!duplicated(data$ym), ]
-  rho_file <- as.data.frame(rho_file[,'ym'])
-  rho_file$rho <- NA
-  names(rho_file)[1] <- "ym"
-  for( i in min(data$N):max(data$N)){
-    sp <- data[data$N == i,]
-    nc <- data.matrix(sp[, spvar])
-    nc <- knearneigh(nc, k=neighbor, longlat = T)
-    nb <- knn2nb(nc)
-    listw <- nb2listw(nb) 
-    reg <- lagsarlm(lnap ~ 1, data = sp, listw)
-    rho_file[i,2] <- summary(reg)$rho
-    rho_file[i,3] <- summary(reg)$rho.se
-    sp_pred <- as.data.frame(predict(reg))
-    sp <- cbind(sp,sp_pred)
-    sp$lnap <- sp$lnap - sp$fit
-    sp$trend <- NULL
-    sp$signal <- NULL
-    sp_list[[i]] <- sp
-  }
-  rho_file$lb <- rho_file$rho - rho_file$V3*qnorm(1-(1-ci)/2)
-  rho_file$ub <- rho_file$rho + rho_file$V3*qnorm(1-(1-ci)/2)
-  result[[1]] <- rho_file
-  data <- rbindlist(sp_list,idcol=T)
+ 
   #lasso deduction
   y <- data$lnap
   cv_model <- cv.glmnet(x, y, alpha = 1)
@@ -106,7 +81,7 @@ ppi <- function(price,date,areas,object,
     }
     if(method == "ipw"){
       data$weight <- ifelse(data$N != min(data$N),
-               1/data$mill,1/(1-data$mill))
+                            1/data$mill,1/(1-data$mill))
       m <- lm(lnap ~ ym,data = data, weight = weight)
     }
   }
@@ -115,6 +90,32 @@ ppi <- function(price,date,areas,object,
     m <- lm(lnap ~ ym,data = data)
   }
   data$pred <- predict(m, newdata = data, type = "response")
+  # spatial deduction
+  sp_list <- list()
+  rho_file <- data[!duplicated(data$ym), ]
+  rho_file <- as.data.frame(rho_file[,'ym'])
+  rho_file$rho <- NA
+  names(rho_file)[1] <- "ym"
+  for( i in min(data$N):max(data$N)){
+    sp <- data[data$N == i,]
+    nc <- data.matrix(sp[, spvar])
+    nc <- knearneigh(nc, k=neighbor, longlat = T)
+    nb <- knn2nb(nc)
+    listw <- nb2listw(nb) 
+    reg <- lagsarlm(lnap ~ 1, data = sp, listw)
+    rho_file[i,2] <- summary(reg)$rho
+    rho_file[i,3] <- summary(reg)$rho.se
+    sp_pred <- as.data.frame(predict(reg))
+    sp <- cbind(sp,sp_pred)
+    sp$lnap <- sp$lnap - sp$fit
+    sp$trend <- NULL
+    sp$signal <- NULL
+    sp_list[[i]] <- sp
+  }
+  rho_file$lb <- rho_file$rho - rho_file$V3*qnorm(1-(1-ci)/2)
+  rho_file$ub <- rho_file$rho + rho_file$V3*qnorm(1-(1-ci)/2)
+  result[[1]] <- rho_file
+  data <- rbindlist(sp_list,idcol=T)
   # variation
   data$final_pred <- data$pred + data$lasso_pred + data$fit
   out <- data.frame(
@@ -126,18 +127,20 @@ ppi <- function(price,date,areas,object,
   out$lb <- (exp(out$coef - out$se*qnorm(1-(1-ci)/2)))*100
   out$ub <- (exp(out$coef + out$se*qnorm(1-(1-ci)/2)))*100
   result[[3]] <- out
-  data$sp_r <- (data$actual-data$fit)^2
-  data$lasso_r <- (data$actual-data$fit-data$lasso_pred)^2
-  data$index_r <- (data$actual-data$fit-data$lasso_pred-data$pred)^2
-  data$tv <- (data$actual - mean(data$actual))^2
-  data$tv2 <- (data$actual-data$fit - mean(data$actual-data$fit))^2
-  data$tv3 <- (data$actual-data$fit-data$lasso_pred - 
-                 mean(data$actual-data$fit-data$lasso_pred))^2
-  spatial.r2 <- 1-sum(data$sp_r)/sum(data$tv)
-  lasso.r2 <- 1-sum(data$lasso_r)/sum(data$tv2)
-  index.r2 <- 1-sum(data$index_r)/sum(data$tv3)
-  r2 <- rbind(spatial.r2,lasso.r2)
-  r2 <- rbind(r2,index.r2)
+  data$lasso_r <- (data$actual-data$lasso_pred)^2
+  data$index_r <- (data$actual-data$lasso_pred-data$pred)^2
+  data$sp_r <- (data$actual-data$lasso_pred-data$pred-data$fit)^2
+  data$tv1 <- (data$actual - mean(data$actual))^2
+  data$tv2 <- (data$actual-data$lasso_pred-mean(data$actual-data$lasso_pred))^2
+  data$tv3 <- (data$actual-data$lasso_pred-data$lasso_pred - 
+                 mean(data$actual-data$lasso_pred-data$lasso_pred))^2
+  lasso.r2 <- 1-sum(data$lasso_r)/sum(data$tv1)
+  index.r2 <- (1-lasso.r2)*(1-sum(data$index_r)/sum(data$tv2))
+  spatial.r2 <- (1-lasso.r2-index.r2)*(1-sum(data$sp_r)/sum(data$tv3))
+  resid.r2 <- 1-lasso.r2-index.r2-spatial.r2
+  r2 <- rbind(index.r2,lasso.r2)
+  r2 <- rbind(r2,spatial.r2)
+  r2 <- rbind(r2,resid.r2)
   rmse <- rmse(data$actual, data$final_pred)
   result[[4]] <- rbind(r2,rmse)
   result
